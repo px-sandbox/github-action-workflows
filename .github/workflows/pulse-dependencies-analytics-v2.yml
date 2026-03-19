@@ -34,82 +34,41 @@ jobs:
         if: ${{ inputs.before_step_command != '' }}
         run: |
           ${{ inputs.before_step_command}}
+      - name: Install dependencies
+        run: npm install
       - name: Capture installed dependencies
         run: npm list --depth=0 --json > installed-deps.json || true
       - name: Read dependencies
         run: |
           #!/bin/bash
-          all_deps='{}'
-          engines_total='{}'
-          internal_packages='[]'
+
+          # All version/dependency data from installed-deps.json.
+          # package.json used ONLY for coreDependencies (engines).
+
           installed_deps=$(cat installed-deps.json)
-          while read -r file;   do
-          name=$(jq -r '.name' "$file")
-          deps=$(jq '.dependencies + .devDependencies' "$file")
-          engines=$(jq '.engines' "$file")
+          package_json=$(cat package.json)
 
-          if [ "$deps" != "null" ]; then
-              all_deps=$(jq -s add <(echo "$all_deps") <(echo "$deps"))
-          fi
-          if [ "$engines" != "null" ]; then
-              engines_total=$(jq -s add <(echo "$engines_total") <(echo "$engines"))
-          fi
-
-          internal_packages=$(jq --arg name "$name" '. + [$name]' <<< "$internal_packages")
-          done < <(find . -name 'package.json')
-
-          dep_names=$(echo "$all_deps" | jq -r 'keys[]')
-
-          dependencies_array='[]'
+          # coreDependencies from package.json "engines" only (e.g. node, npm)
           core_dependencies_array='[]'
-
-          for dep in $dep_names; do
-
-          declared_version=$(echo "$all_deps" | jq -r ".[\"$dep\"]")
-
-          # 👉 NEW: get installed version from npm list
-          installed_version=$(echo "$installed_deps" | jq -r ".dependencies[\"$dep\"].version")
-
-          # 👉 fallback if not found
-          if [ "$installed_version" == "null" ] || [ -z "$installed_version" ]; then
-              installed_version=$(echo "$declared_version" | sed 's/^[^0-9]*//')
+          engines=$(echo "$package_json" | jq -c '.engines // {}')
+          if [ "$engines" != "{}" ]; then
+            for key in $(echo "$engines" | jq -r 'keys[]'); do
+              core_version=$(echo "$engines" | jq -r ".[\"$key\"]" | sed 's/^[^0-9]*//')
+              core_dependencies_array=$(echo "$core_dependencies_array" | jq \
+                --arg name "$key" --arg v "$core_version" \
+                '. += [{ "dependencyName": $name, "currentVersion": $v }]')
+            done
           fi
 
-          # Skip workspace deps
-          if [[ "$declared_version" == workspace:* ]]; then
-            continue
-          fi
+          # Output: installed-deps.json format (all data from installed-deps.json) + coreDependencies from package.json
+          echo "$installed_deps" | jq --argjson core "$core_dependencies_array" \
+            '. + { "coreDependencies": $core }' \
+            > pulse-version-upgrades-report.json
 
-          # Basic validation (same as before)
-          if [[ $installed_version =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]];  
-          then
-          dependencies_array=$(echo "$dependencies_array" | jq ". += [{
-              \"dependencyName\": \"$dep\",
-              \"currentVersion\": \"$installed_version\"
-            }]")
-          else
-            echo "Invalid version for $dep: $installed_version"
-            continue
-          fi
+          echo "Dependency list (dependencyName and version updated):"
+          echo "$installed_deps" | jq -r '.dependencies | to_entries[] | "  \(.key): \(.value.version)"'
 
-          done
-
-          core_dep_names=$(echo "$engines_total" | jq -r 'keys[]')
-            for core_dep in $core_dep_names; do
-              core_version=$(echo "$engines_total" | jq -r ".[\"$core_dep\"]" | sed 's/^[^0-9]*//')
-              core_dependencies_array=$(echo "$core_dependencies_array" | jq ". += [{
-                \"dependencyName\": \"$core_dep\",
-
-                \"currentVersion\": \"$core_version\"
-              }]")
-              done
-              # Remove internal packages (unchanged)
-          dependencies_array=$(jq --argjson internal_packages "$internal_packages" \
-          'map(select(.dependencyName | IN($internal_packages[]) | not))' <<< "$dependencies_array")
-              
-          nested_info="{\"coreDependencies\": $core_dependencies_array, \"repositoryInfo\": {\"repoName\": \"${{ github.repository }}\", \"repoId\": \"${{ github.repository_id }}\", \"repoOwner\": \"${{ github.repository_owner }}\"}, \"dependencies\": $dependencies_array}"
-              
-              echo "$nested_info" > pulse-version-upgrades-report.json
+          echo "Wrote pulse-version-upgrades-report.json (versions from installed-deps.json, coreDependencies from package.json engines only)"
 
       - name: Upload Version Upgrades Report Artifact
         uses: actions/upload-artifact@v4
