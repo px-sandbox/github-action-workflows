@@ -34,8 +34,6 @@ jobs:
         if: ${{ inputs.before_step_command != '' }}
         run: |
           ${{ inputs.before_step_command}}
-      - name: Install dependencies
-        run: npm install
       - name: Capture installed dependencies
         run: npm list --depth=0 --json > installed-deps.json || true
       - name: Read dependencies
