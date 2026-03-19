@@ -1,0 +1,46 @@
+name: Pulse - Dependency Analytics
+'on':
+  workflow_call:
+    inputs:
+      PULSE_URL:
+        type: string
+        default: 'https://a0lrn1xwl4.execute-api.eu-west-1.amazonaws.com'
+      before_step_command:
+        type: string
+        default: ''
+      after_step_command:
+        type: string
+        default: ''
+jobs:
+  pulse_dependencies_report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: '${{ github.ref }}'
+      - name: Set up Node.js
+        uses: actions/setup-node@v2
+        with:
+          node-version: '20'
+      - name: Install jq and curl
+        run: sudo apt-get install -y jq curl
+      - name: before step
+        if: '${{ inputs.before_step_command != '''' }}'
+        run: |
+          ${{ inputs.before_step_command}}
+      - name: Install dependencies
+        run: npm ci
+      - name: Capture installed dependencies
+        run: npm list --depth=0 --json > installed-deps.json || true
+      - name: Read dependencies
+        run: "#!/bin/bash\nall_deps='{}'\nengines_total='{}'\ninternal_packages='[]'\ninstalled_deps=$(cat installed-deps.json)\nwhile read -r file;   do\nname=$(jq -r '.name' \"$file\")\ndeps=$(jq '.dependencies + .devDependencies' \"$file\")\nengines=$(jq '.engines' \"$file\")\n\nif [ \"$deps\" != \"null\" ]; then\n    all_deps=$(jq -s add <(echo \"$all_deps\") <(echo \"$deps\"))\nfi\nif [ \"$engines\" != \"null\" ]; then\n    engines_total=$(jq -s add <(echo \"$engines_total\") <(echo \"$engines\"))\nfi\n\ninternal_packages=$(jq --arg name \"$name\" '. + [$name]' <<< \"$internal_packages\")\ndone < <(find . -name 'package.json')\n\ndep_names=$(echo \"$all_deps\" | jq -r 'keys[]')\n\ndependencies_array='[]'\ncore_dependencies_array='[]'\n\nfor dep in $dep_names; do\n\ndeclared_version=$(echo \"$all_deps\" | jq -r \".[\\\"$dep\\\"]\")\n\n# \U0001F449 NEW: get installed version from npm list\ninstalled_version=$(echo \"$installed_deps\" | jq -r \".dependencies[\\\"$dep\\\"].version\")\n\n# \U0001F449 fallback if not found\nif [ \"$installed_version\" == \"null\" ] || [ -z \"$installed_version\" ]; then\n    installed_version=$(echo \"$declared_version\" | sed 's/^[^0-9]*//')\nfi\n\n# Skip workspace deps\nif [[ \"$declared_version\" == workspace:* ]]; then\n  continue\nfi\n\n# Basic validation (same as before)\nif [[ $installed_version =~ ^[0-9]+\\.[0-9]+\\.[0-9]+ ]];  \nthen\ndependencies_array=$(echo \"$dependencies_array\" | jq \". += [{\n    \\\"dependencyName\\\": \\\"$dep\\\",\n    \\\"currentVersion\\\": \\\"$installed_version\\\"\n  }]\")\nelse\n  echo \"Invalid version for $dep: $installed_version\"\n  continue\nfi\n\ndone\n\ncore_dep_names=$(echo \"$engines_total\" | jq -r 'keys[]')\n  for core_dep in $core_dep_names; do\n    core_version=$(echo \"$engines_total\" | jq -r \".[\\\"$core_dep\\\"]\" | sed 's/^[^0-9]*//')\n    core_dependencies_array=$(echo \"$core_dependencies_array\" | jq \". += [{\n      \\\"dependencyName\\\": \\\"$core_dep\\\",\n\n      \\\"currentVersion\\\": \\\"$core_version\\\"\n    }]\")\n    done\n    # Remove internal packages (unchanged)\ndependencies_array=$(jq --argjson internal_packages \"$internal_packages\" \\\n'map(select(.dependencyName | IN($internal_packages[]) | not))' <<< \"$dependencies_array\")\n    \nnested_info=\"{\\\"coreDependencies\\\": $core_dependencies_array, \\\"repositoryInfo\\\": {\\\"repoName\\\": \\\"${{ github.repository }}\\\", \\\"repoId\\\": \\\"${{ github.repository_id }}\\\", \\\"repoOwner\\\": \\\"${{ github.repository_owner }}\\\"}, \\\"dependencies\\\": $dependencies_array}\"\n    \n    echo \"$nested_info\" > pulse-version-upgrades-report.json\n"
+      - name: Upload Version Upgrades Report Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pulse-version-upgrades-report
+          path: pulse-version-upgrades-report.json
+      - name: after step
+        if: '${{ inputs.after_step_command != '''' }}'
+        run: |
+          ${{ inputs.after_step_command}}
