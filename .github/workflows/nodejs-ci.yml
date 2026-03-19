@@ -462,5 +462,5 @@ jobs:
   pulse_version_upgrades:
     name: pulse_version_upgrades
     if: ${{ github.event.pull_request.merged == true && contains(inputs.dev_test_branch, github.event.pull_request.base.ref) }}
-    uses: px-sandbox/github-action-workflows/.github/workflows/pulse-dependencies-analytics-v2.yml@master
+    uses: px-sandbox/github-action-workflows/.github/workflows/pulse-dependencies-analytics-v2.yml@main
     secrets: inherit
