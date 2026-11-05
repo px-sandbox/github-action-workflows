@@ -1,0 +1,91 @@
+name: Pulse - SAST Analytics
+
+on:
+  workflow_call:
+    inputs:
+      PULSE_URL:
+        type: string
+        default: "https://a0lrn1xwl4.execute-api.eu-west-1.amazonaws.com"
+      semgrep_options:
+        type: string
+        default: ""
+      before_step_command:
+        type: string
+        default: ""
+      after_step_command:
+        type: string
+        default: ""
+
+jobs:
+  pulse_sast_report:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/studiographene/ci:node-22-alpine
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+      - name: before step
+        if: ${{ inputs.before_step_command != '' }}
+        run: |
+          ${{ inputs.before_step_command}}
+      - name: SAST Scan
+        id: generate_report
+        run: |
+          cp /root/configs/semgrep/rules/eslint.v1.3.32.yml eslint.v1.3.32.yml
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          semgrep scan --config "p/default" --config eslint.v1.3.32.yml --json ${{ inputs.semgrep_options }} | tee semgrep.json
+      - name: Display Errors
+        id: display_errors
+        env:
+          # PR runs keep the existing base-branch behaviour; push runs now get a real branch
+          BRANCH_NAME: ${{ github.event.pull_request.base.ref || github.ref_name }}
+          REPO_NAME: ${{ github.repository }}
+          ORG_ID: ${{ github.event.organization.id }}
+          REPO_ID: ${{ github.repository_id }}
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          MERGED_AT: ${{ github.event.pull_request.merged_at }}
+          IS_DEFAULT_BRANCH: ${{ github.event_name == 'push' && github.ref_name == github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          # Legacy v1 fields, unchanged shape so the existing consumer keeps working
+          jq '[.results[] | {ruleId: .check_id, message: .extra.message, location: .path, lineNo: .start.line, snippet: .extra.lines}]' semgrep.json > temp_errors.json
+          created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          # Superset: raw Semgrep JSON (results, version, ...) + legacy fields + v2 metadata
+          jq \
+            --arg date "$(date +%Y-%m-%d)" \
+            --arg createdAt "$created_at" \
+            --arg branch "$BRANCH_NAME" \
+            --arg repo "$REPO_NAME" \
+            --arg orgId "$ORG_ID" \
+            --arg repoId "$REPO_ID" \
+            --arg commitSha "$COMMIT_SHA" \
+            --arg prNumber "$PR_NUMBER" \
+            --arg mergedAt "$MERGED_AT" \
+            --arg isDefault "$IS_DEFAULT_BRANCH" \
+            --slurpfile errors temp_errors.json \
+            '. + {
+               date: $date, createdAt: $createdAt, branch: $branch, repo: $repo,
+               orgId: $orgId, repoId: $repoId, commitSha: $commitSha,
+               prNumber: (if $prNumber == "" then null else ($prNumber | tonumber) end),
+               mergedAt: (if $mergedAt == "" then null else $mergedAt end),
+               isDefaultBranch: ($isDefault == "true"),
+               errors: $errors[0]
+             }' semgrep.json > pulse-security-errors-report.json
+          echo "No. of error findings: $(jq '.results | length' semgrep.json)"
+
+      - name: Upload SAST Errors Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pulse-security-errors-report
+          path: pulse-security-errors-report.json
+
+      - name: after step
+        if: ${{ inputs.after_step_command != '' }}
+        run: |
+          ${{ inputs.after_step_command}}
